@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:tiktok/src/core/common_widgets/alert_dialogs.dart';
 import 'package:tiktok/src/core/common_widgets/async_value_widget.dart';
+import 'package:tiktok/src/core/localization/string_hardcoded.dart';
 import 'package:tiktok/src/features/home/data/home_repository.dart';
 import 'package:tiktok/src/features/home/presentation/feed_view.dart';
 
@@ -41,7 +42,9 @@ class HomePage extends ConsumerWidget {
       ),
       body: AsyncValueWidget(
         value: videosValue,
-        data: (videos) => FeedView(videos: videos),
+        data: (videos) => videos.isNotEmpty
+            ? FeedView(videos: videos)
+            : Center(child: Text('No new videos yet'.hardcoded)),
       ),
     );
   }

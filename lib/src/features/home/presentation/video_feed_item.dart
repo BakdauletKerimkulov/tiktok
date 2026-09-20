@@ -5,16 +5,27 @@ import 'package:tiktok/src/features/home/domain/video_model.dart';
 import 'package:video_player/video_player.dart';
 
 class VideoFeedItem extends StatelessWidget {
-  const VideoFeedItem({super.key, required this.model, required this.isActive});
+  const VideoFeedItem({
+    super.key,
+    required this.model,
+    required this.isActive,
+    required this.controller,
+  });
 
   final VideoModel model;
   final bool isActive;
+  final VideoPlayerController? controller;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        VideoPlayerView(id: model.id, url: model.url, isActive: isActive),
+        VideoPlayerView(
+          id: model.id,
+          url: model.url,
+          isActive: isActive,
+          controller: controller,
+        ),
         Positioned(right: 0, bottom: 0, child: SideButtons()),
         Positioned(
           left: 0,
@@ -42,10 +53,12 @@ class VideoPlayerView extends StatefulWidget {
     required this.id,
     required this.url,
     required this.isActive,
+    required this.controller,
   });
   final VideoModelId id;
   final String url;
   final bool isActive;
+  final VideoPlayerController? controller;
 
   @override
   State<VideoPlayerView> createState() => _VideoPlayerViewState();
@@ -53,111 +66,112 @@ class VideoPlayerView extends StatefulWidget {
 
 class _VideoPlayerViewState extends State<VideoPlayerView>
     with WidgetsBindingObserver {
-  VideoPlayerController? _controller;
-
   // Единственный кэш снимка value, обновляемый в _onChanged.
   bool _isInitialized = false;
   bool _isPlaying = false;
-  String? _error;
+  bool _isUserTapPause = false;
+  bool _isWidgetVisible = false;
+  bool _isAppResumed = true;
+  String? _initError;
+  String? _valueError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initController();
+    _initCache();
   }
 
   @override
   void didUpdateWidget(covariant VideoPlayerView oldWidget) {
     super.didUpdateWidget(oldWidget);
 
-    if (widget.id != oldWidget.id || widget.url != oldWidget.url) {
-      _disposeController();
-      _initController(); // isActive применится в .then()
-      return; // ВАЖНО: не трогаем свежий контроллер ниже
+    if (widget.id != oldWidget.id ||
+        widget.url != oldWidget.url ||
+        oldWidget.controller != widget.controller) {
+      _resetCache(oldWidget.controller);
+      _initCache();
     }
 
     if (widget.isActive != oldWidget.isActive) {
+      final controller = widget.controller;
+      if (controller == null) return;
+      if (widget.isActive) controller.seekTo(Duration.zero);
       _applyActiveState();
     }
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _isWidgetVisible = TickerMode.of(context);
+    _applyActiveState();
+  }
+
+  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    final controller = _controller;
-    if (controller == null || !_isInitialized) return;
+    _isAppResumed = state == AppLifecycleState.resumed;
+    _applyActiveState();
+  }
 
-    switch (state) {
-      case AppLifecycleState.resumed:
-        if (widget.isActive) controller.play();
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.paused:
-      case AppLifecycleState.hidden:
-      case AppLifecycleState.detached:
-        controller.pause();
+  void _initCache() {
+    final controller = widget.controller;
+    controller?.addListener(_onChanged);
+
+    _isInitialized = controller?.value.isInitialized ?? false;
+    _isPlaying = controller?.value.isPlaying ?? false;
+    if (controller != null && controller.value.hasError) {
+      _valueError = controller.value.errorDescription;
     }
+
+    _applyActiveState();
   }
 
-  void _initController() {
-    final controller = VideoPlayerController.asset(widget.url);
-    _controller = controller;
-
-    controller
-      ..setLooping(true)
-      ..addListener(_onChanged);
-
-    controller
-        .initialize()
-        .then((_) {
-          if (!mounted || !identical(controller, _controller)) return;
-          if (widget.isActive) controller.play();
-        })
-        .catchError((Object e) {
-          if (!mounted || !identical(controller, _controller)) return;
-          setState(() => _error = e.toString());
-        });
-  }
-
-  void _disposeController() {
-    _controller
-      ?..removeListener(_onChanged)
-      ..dispose();
-    _controller = null;
-
+  void _resetCache(VideoPlayerController? controller) {
     // Сброс ВСЕГО кэша — иначе build отрисует новый контроллер
     // так, будто он уже готов.
+    controller?.removeListener(_onChanged);
     _isInitialized = false;
+    _isUserTapPause = false;
     _isPlaying = false;
-    _error = null;
+    _initError = null;
+    _valueError = null;
   }
 
   void _onChanged() {
-    final value = _controller?.value;
-    if (value == null) return;
+    final controller = widget.controller;
+
+    if (controller == null) return;
+
+    final value = controller.value;
 
     final error = value.hasError ? value.errorDescription : null;
 
     if (value.isInitialized == _isInitialized &&
         value.isPlaying == _isPlaying &&
-        error == _error) {
+        error == _valueError) {
       return;
     }
 
     setState(() {
       _isInitialized = value.isInitialized;
       _isPlaying = value.isPlaying;
-      _error ??= error; // ошибка из catchError имеет приоритет
+      _valueError = error;
     });
+
+    _applyActiveState();
   }
 
   void _applyActiveState() {
-    final controller = _controller;
+    final controller = widget.controller;
     if (controller == null || !_isInitialized) return;
 
-    if (widget.isActive) {
+    if (widget.isActive &&
+        !_isUserTapPause &&
+        _isWidgetVisible &&
+        _isAppResumed) {
       controller
         ..setPlaybackSpeed(1.0)
-        ..seekTo(Duration.zero)
         ..play();
     } else {
       controller
@@ -167,21 +181,21 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   }
 
   void _togglePlay() {
-    final controller = _controller;
-    if (controller == null || !_isInitialized) return;
-    _isPlaying ? controller.pause() : controller.play();
+    if (!_isInitialized) return;
+    _isUserTapPause = !_isUserTapPause;
+    _applyActiveState();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _disposeController();
+    _resetCache(widget.controller);
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final error = _error;
+    final error = _initError ?? _valueError;
     if (error != null) {
       return _ErrorView(
         message: error,
@@ -189,8 +203,10 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
       );
     }
 
-    final controller = _controller;
-    if (controller == null || !_isInitialized) return const _LoadingView();
+    final controller = widget.controller;
+    if (controller == null || !_isInitialized) {
+      return const _LoadingView();
+    }
 
     final size = controller.value.size;
 
